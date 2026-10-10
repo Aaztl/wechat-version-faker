@@ -2,8 +2,8 @@
 #include <tlhelp32.h>
 #include <stdio.h>
 
-#define TARGET_OLD_VER 0x63090C38   // 旧版本 3.9.12.56
-#define TARGET_NEW_VER 0x63090C51   // 伪装目标版本
+#define TARGET_OLD_VER 0x63090C38   // 本地旧版 3.9.12.56
+#define TARGET_NEW_VER 0x6400061A   // 伪装成 4.0.6.26 (0x6400061A)，腾讯服务器全面放行版本
 
 static BOOL GetWeChatWinInfo(DWORD pid, DWORD_PTR* outBase, DWORD* outSize) {
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
@@ -33,10 +33,12 @@ static int SafePatchMemory(HANDLE hProcess, DWORD_PTR base, DWORD size, DWORD ol
     MEMORY_BASIC_INFORMATION mbi;
 
     while (currentAddr < endAddr && VirtualQueryEx(hProcess, (LPCVOID)currentAddr, &mbi, sizeof(mbi))) {
-        DWORD protect = mbi.Protect & ~(PAGE_GUARD | PAGE_NOCACHE);
-        BOOL isReadable = (protect == PAGE_READONLY || protect == PAGE_READWRITE || protect == PAGE_EXECUTE_READWRITE);
+        // 关键修复：只要是已提交页面且不是保护/无权限页，全部允许读取扫描（支持 WRITECOPY、EXECUTE_READ 等）
+        BOOL isReadable = (mbi.State == MEM_COMMIT) && 
+                          !(mbi.Protect & PAGE_NOACCESS) && 
+                          !(mbi.Protect & PAGE_GUARD);
 
-        if ((mbi.State == MEM_COMMIT) && isReadable) {
+        if (isReadable) {
             BYTE* buffer = (BYTE*)malloc(mbi.RegionSize);
             if (buffer) {
                 SIZE_T bytesRead = 0;
@@ -83,7 +85,6 @@ int main(void) {
     printf("[*] Launching WeChat.exe...\n");
     if (!CreateProcessA("WeChat.exe", NULL, NULL, NULL, FALSE, 0, NULL, exePath, &si, &pi)) {
         printf("[-] Failed to start WeChat.exe! Error: %lu\n", GetLastError());
-        printf("[-] Make sure this tool is placed in the WeChat directory.\n");
         system("pause");
         return 1;
     }
@@ -100,22 +101,24 @@ int main(void) {
         printf("[-] Timed out waiting for WeChatWin.dll.\n");
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
+        system("pause");
         return 1;
     }
 
     printf("[+] Found WeChatWin.dll at 0x%p (Size: 0x%lX)\n", (void*)dllBase, dllSize);
-    printf("[*] Patching memory signatures...\n");
+    printf("[*] Patching memory signatures to 4.x (0x6400061A)...\n");
     int count = SafePatchMemory(pi.hProcess, dllBase, dllSize, TARGET_OLD_VER, TARGET_NEW_VER);
 
     if (count > 0) {
         printf("\n[+] SUCCESS! Patched %d version records in memory.\n", count);
         printf("[+] You can now scan QR code to login without version prompt!\n\n");
     } else {
-        printf("\n[-] Warning: No matching version signature found.\n");
+        printf("\n[-] Warning: 0 signature matched. Old version not found in memory.\n");
     }
 
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    Sleep(2000);
+
+    Sleep(2500);
     return 0;
 }
